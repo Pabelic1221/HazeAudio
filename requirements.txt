@@ -1,0 +1,4 @@
+# Qt for Python. Essentials + Addons are needed (audio lives in Addons).
+PySide6-Essentials>=6.8,<7
+PySide6-Addons>=6.8,<7
+pyinstaller>=6.10,<7
