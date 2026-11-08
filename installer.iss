@@ -1,6 +1,6 @@
 ; Inno Setup script - turns dist\HazeAudio into a normal Windows installer (Setup.exe)
 #define AppName "HazeAudio"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 
 [Setup]
 AppId={{B7C2D1A4-5E3F-4A9B-8C21-6D4F0A1E9B73}
