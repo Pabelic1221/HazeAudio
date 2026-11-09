@@ -21,11 +21,24 @@ from string import Template
 from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QPoint, QPointF,
                             QPropertyAnimation, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont,
-                           QFontMetrics, QGuiApplication, QIcon, QImage, QKeySequence,
+                           QFontMetrics, QCursor, QGuiApplication, QIcon, QImage, QKeySequence,
                            QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
                            QPolygonF, QRadialGradient, QShortcut)
-from PySide6.QtMultimedia import (QAudioFormat, QAudioOutput, QMediaDevices, QMediaMetaData,
-                                  QMediaPlayer)
+try:
+    from PySide6.QtMultimedia import (QAudioFormat, QAudioOutput, QMediaDevices, QMediaMetaData,
+                                      QMediaPlayer)
+except ImportError:  # audio lives in PySide6-Addons; say so clearly instead of a bare traceback
+    _msg = ("HazeAudio needs the Qt audio module, which is missing.\n\n"
+            "Fix:  py -m pip install -r requirements.txt\n"
+            "(or: py -m pip install PySide6-Addons)")
+    print(_msg)
+    try:
+        from PySide6.QtWidgets import QApplication as _App, QMessageBox as _Box
+        _app = _App([])
+        _Box.critical(None, "HazeAudio", _msg)
+    except Exception:
+        pass
+    sys.exit(1)
 try:
     from PySide6.QtMultimedia import QAudioBufferOutput
 except ImportError:  # older Qt: the app still works, just without the visualizer
@@ -35,7 +48,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton,
                                QSizeGrip, QSlider, QStyle, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APP_NAME = "HazeAudio"
 AUDIO_EXT = {".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus", ".wma", ".weba"}
 PLAYLIST_EXT = {".m3u", ".m3u8"}
@@ -445,9 +458,9 @@ class IconButton(QAbstractButton):
             p.drawEllipse(QPointF(c.x(), w - 4.5), 1.8, 1.8)
 
 
-def paint_backdrop(p, w, h, radius, theme, blobs, border: QColor, border_w=1.5):
+def paint_backdrop(p, w, h, radius, theme, blobs, border: QColor, border_w=1.5, region=None):
     path = QPainterPath()
-    path.addRoundedRect(QRectF(1, 1, w - 2, h - 2), radius, radius)
+    path.addRoundedRect(region if region is not None else QRectF(1, 1, w - 2, h - 2), radius, radius)
     p.setClipPath(path)
     c0, c1, c2 = (QColor(x) for x in theme["bg"])
     bg = QLinearGradient(0, 0, w, h)
@@ -711,8 +724,39 @@ class Visualizer(QWidget):
             p.drawRoundedRect(QRectF(x, y, bw, bh), bw / 2, bw / 2)
 
 
+MINI_W, MINI_H = 520, 100
+PEEK = 10        # pixels of the notch that stay visible when it is tucked away at the top edge
+NOTCH_W = 190
+DISC = 68
+
+
+def draw_note(p, x, y, size, color):
+    """Tiny vector music note (no font needed)."""
+    p.save()
+    p.translate(x, y)
+    p.scale(size / 10.0, size / 10.0)
+    p.setPen(Qt.NoPen)
+    p.setBrush(color)
+    p.save()
+    p.rotate(-20)
+    p.drawEllipse(QPointF(0, 0), 3.4, 2.5)
+    p.restore()
+    p.drawRect(QRectF(2.5, -9.6, 1.2, 9.9))
+    flag = QPainterPath()
+    flag.moveTo(3.7, -9.6)
+    flag.cubicTo(6.8, -8.2, 7.6, -5.4, 6.4, -3.0)
+    flag.cubicTo(6.6, -5.6, 5.3, -7.0, 3.7, -7.3)
+    flag.closeSubpath()
+    p.drawPath(flag)
+    p.restore()
+
+
 class MiniPlayer(QWidget):
-    """Small always-on-top glass bar."""
+    """Playful mini-player: spinning record, beat-pulsing glow, floating notes, skyline equalizer.
+
+    Docked mode hangs it from the top-center of the screen like a notch. It tucks away, springs out
+    when you hover it, drop files on it, or when a new song starts, and tucks away again."""
+    seekRequested = Signal(float)
 
     @property
     def theme(self):  # lets IconButton read the active theme from its window
@@ -724,14 +768,38 @@ class MiniPlayer(QWidget):
         self.setWindowTitle(APP_NAME)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(420, 96)
+        self.setAcceptDrops(True)
+        self.setFixedSize(MINI_W, MINI_H)
+        self.docked = True
+        self.dock_screen = None
+        self.reveal = 1.0      # 1 = fully out, 0 = tucked into the notch (can overshoot while springing)
+        self._target = 1.0
         self.progress = 0.0
+        self.playing = False
+        self.angle = 0.0
+        self.phase = 0.0
+        self.notes = []
+        self._spawn = 0
+        self.disc_pm = None
+        self._drag = None
+        self._seeking = False
+        self._glide = None
+        self.anim = QVariantAnimation(self)
+        self.anim.valueChanged.connect(self._on_reveal)
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self._auto_collapse)
+        self.tick = QTimer(self)
+        self.tick.setInterval(33)
+        self.tick.timeout.connect(self._tick)
+
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 10, 14, 18)
+        lay.setContentsMargins(16, 12, 14, 24)
         lay.setSpacing(8)
+        lay.addSpacing(DISC + 6)  # room for the record, which is painted in paintEvent
         col = QVBoxLayout()
         col.setSpacing(0)
-        self.title = QLabel("Nothing playing")
+        self.title = QLabel("")
         self.title.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.artist = QLabel("")
         self.artist.setObjectName("muted")
@@ -741,50 +809,355 @@ class MiniPlayer(QWidget):
         col.addStretch()
         lay.addLayout(col, 1)
         self.b_prev = IconButton("prev", 36, tip="Previous")
-        self.b_play = IconButton("play", 48, primary=True, tip="Play / Pause")
+        self.b_play = IconButton("play", 50, primary=True, tip="Play / Pause")
         self.b_next = IconButton("next", 36, tip="Next")
+        self.b_pin = IconButton("pin", 30, checkable=True, tip="Auto-hide at the top of the screen")
+        self.b_pin.setChecked(True)
+        self.b_pin.toggled.connect(self.set_docked)
         self.b_open = IconButton("expand", 30, tip="Back to full player")
         self.b_quit = IconButton("close", 30, danger=True, tip="Quit")
-        for b in (self.b_prev, self.b_play, self.b_next, self.b_open, self.b_quit):
+        for b in (self.b_prev, self.b_play, self.b_next, self.b_pin, self.b_open, self.b_quit):
             lay.addWidget(b, 0, Qt.AlignVCenter)
+        self.set_text("Nothing playing", "")
 
+    # ---------- content ----------
     def set_text(self, title, artist):
-        fm = QFontMetrics(self.title.font())
-        self.title.setText(fm.elidedText(title, Qt.ElideRight, 158))
+        if title == "Nothing playing":
+            title, artist = "Drop a song on me", "I’m hungry for music"
+        self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, 140))
         self.title.setToolTip(title)
-        self.artist.setText(QFontMetrics(self.artist.font()).elidedText(artist, Qt.ElideRight, 158))
+        self.artist.setText(QFontMetrics(self.artist.font()).elidedText(artist, Qt.ElideRight, 140))
 
     def set_playing(self, on):
+        self.playing = bool(on)
         self.b_play.setKind("pause" if on else "play")
 
     def set_progress(self, pos, dur):
         self.progress = pos / dur if dur > 0 else 0.0
         self.update()
 
+    def set_cover(self, img):
+        """Round 'vinyl' made from the cover art (or a themed placeholder)."""
+        a, b = self.theme["acc"]
+        dpr = max(1.0, self.devicePixelRatioF())
+        px = int(DISC * dpr)
+        pm = QPixmap(px, px)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        c = QPointF(DISC / 2, DISC / 2)
+        clip = QPainterPath()
+        clip.addEllipse(QRectF(0, 0, DISC, DISC))
+        p.setClipPath(clip)
+        if img is not None and not img.isNull():
+            scaled = QPixmap.fromImage(img).scaled(px, px, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            p.drawPixmap(QRectF((DISC - scaled.width() / dpr) / 2, (DISC - scaled.height() / dpr) / 2,
+                                scaled.width() / dpr, scaled.height() / dpr), scaled, QRectF(scaled.rect()))
+        else:
+            g = QLinearGradient(0, 0, DISC, DISC)
+            g.setColorAt(0, QColor(a))
+            g.setColorAt(1, QColor(b))
+            p.fillRect(QRectF(0, 0, DISC, DISC), g)
+            draw_note(p, DISC / 2 - 4, DISC / 2 + 9, 27, QColor(255, 255, 255, 225))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(0, 0, 0, 38), 1.0))
+        for rr in (13, 18, 23, 28):  # record grooves
+            p.drawEllipse(c, rr, rr)
+        p.setClipping(False)
+        p.setBrush(QColor(14, 10, 34, 235))
+        p.setPen(QPen(QColor(255, 255, 255, 140), 1.2))
+        p.drawEllipse(c, 6.2, 6.2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 170))
+        p.drawEllipse(c, 1.6, 1.6)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 120), 1.5))
+        p.drawEllipse(c, DISC / 2 - 0.8, DISC / 2 - 0.8)
+        p.end()
+        self.disc_pm = pm
+        self.update()
+
+    # ---------- docking: tuck away / spring out ----------
+    def _screen(self):
+        scr = self.dock_screen
+        if scr is None or scr not in QGuiApplication.screens():
+            scr = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
+            self.dock_screen = scr
+        return scr
+
+    def _dock_pos(self, t):
+        g = self._screen().geometry()
+        x = g.x() + (g.width() - self.width()) // 2
+        shown = g.y() + 10
+        hidden = g.y() - (self.height() - PEEK)
+        return QPoint(x, int(hidden + (shown - hidden) * t))
+
+    def _animate(self, target, ms, curve):
+        self._target = target
+        self.anim.stop()
+        self.anim.setStartValue(float(self.reveal))
+        self.anim.setEndValue(float(target))
+        self.anim.setDuration(ms)
+        self.anim.setEasingCurve(curve)
+        self.anim.start()
+
+    def _on_reveal(self, v):
+        self.reveal = float(v)
+        if self.docked:
+            self.move(self._dock_pos(self.reveal))
+        self.update()
+
+    def expand(self):
+        if not self.docked:
+            return
+        self.hide_timer.stop()
+        if self._target < 1.0 or self.reveal < 0.999:
+            self._animate(1.0, 380, QEasingCurve.OutBack)  # springy overshoot
+        self.raise_()
+
+    def _busy(self):
+        return (self._drag is not None or self._seeking or self.frameGeometry().contains(QCursor.pos()))
+
+    def collapse(self):
+        if self.docked and not self._busy():
+            self._animate(0.0, 280, QEasingCurve.InCubic)
+
+    def _auto_collapse(self):
+        if self._busy():
+            self.hide_timer.start(500)
+        else:
+            self.collapse()
+
+    def present(self):
+        """Called when mini mode starts. Docked: peek out for a moment, then tuck away to show where it lives."""
+        main = self.app_win
+        self.dock_screen = main.screen() or QGuiApplication.primaryScreen()
+        if self.docked:
+            self.reveal, self._target = 0.0, 0.0
+            self.move(self._dock_pos(0.0))
+            self.show()
+            self.expand()
+            self.hide_timer.start(2600)
+        else:
+            g = main.geometry()
+            self.move(g.x() + g.width() - self.width() - 24, g.y() + 24)
+            self.reveal, self._target = 1.0, 1.0
+            self.show()
+
+    def announce(self):
+        """New song started: pop out briefly like a now-playing toast."""
+        if self.isVisible() and self.docked:
+            self.expand()
+            self.hide_timer.start(3200)
+
+    def set_docked(self, on):
+        self.docked = bool(on)
+        self.b_pin.blockSignals(True)
+        self.b_pin.setChecked(self.docked)
+        self.b_pin.blockSignals(False)
+        if not self.isVisible():
+            return
+        self.anim.stop()
+        if self.docked:
+            self.dock_screen = QGuiApplication.screenAt(self.geometry().center()) or self._screen()
+            self.reveal, self._target = 1.0, 1.0
+            self._glide_to(self._dock_pos(1.0))  # snap to top-center
+            self.hide_timer.start(1100)
+        else:
+            self.hide_timer.stop()
+            if self.reveal < 1.0:  # was tucked away: bring it fully on screen
+                self.move(self._dock_pos(1.0))
+            self.reveal, self._target = 1.0, 1.0
+            self.update()
+
+    def _glide_to(self, pos):
+        self._glide = QPropertyAnimation(self, b"pos", self)
+        self._glide.setDuration(240)
+        self._glide.setEndValue(pos)
+        self._glide.setEasingCurve(QEasingCurve.OutCubic)
+        self._glide.start()
+
+    # ---------- events ----------
+    def showEvent(self, e):
+        self.tick.start()
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self.tick.stop()
+        self.hide_timer.stop()
+        self.anim.stop()
+        super().hideEvent(e)
+
+    def enterEvent(self, e):
+        if self.docked:
+            self.expand()
+
+    def leaveEvent(self, e):
+        if self.docked:
+            self.hide_timer.start(650)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self.expand()
+
+    def dragLeaveEvent(self, e):
+        if self.docked:
+            self.hide_timer.start(900)
+
+    def dropEvent(self, e):
+        self.app_win.add_paths([u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()])
+        if self.docked:
+            self.hide_timer.start(2500)
+
+    def _in_progress(self, pos):
+        return (self.reveal > 0.5 and pos.y() >= self.height() - 24 and 12 <= pos.x() <= self.width() - 12)
+
+    def _seek_to(self, x):
+        r = max(0.0, min(1.0, (x - 18) / (self.width() - 36)))
+        self.progress = r
+        self.seekRequested.emit(r)
+        self.update()
+
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and self.windowHandle():
-            self.windowHandle().startSystemMove()
+        if e.button() != Qt.LeftButton:
+            return
+        if self._in_progress(e.position()):
+            self._seeking = True
+            self._seek_to(e.position().x())
+        else:
+            self._drag = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, e):
+        if self._seeking:
+            self._seek_to(e.position().x())
+        elif self._drag is not None and e.buttons() & Qt.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag)
+
+    def mouseReleaseEvent(self, e):
+        if self._seeking:
+            self._seeking = False
+        elif self._drag is not None:
+            self._drag = None
+            scr = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
+            # dropped near the top edge: magnetically snap to the dock; anywhere else: float freely
+            self.dock_screen = scr
+            self.set_docked(self.geometry().top() <= scr.geometry().top() + 90)
 
     def mouseDoubleClickEvent(self, e):
         self.app_win.show_main()
 
+    # ---------- animation tick + painting ----------
+    def _tick(self):
+        self.phase += 0.12
+        if self.playing:
+            self.angle = (self.angle + 3.0) % 360
+            self._spawn += 1
+            if self._spawn >= 16 and self.reveal > 0.6:
+                self._spawn = 0
+                self.notes.append(dict(x=16 + DISC - 10 + random.uniform(-6, 6), y=30.0,
+                                       vx=random.uniform(-0.15, 0.45), vy=random.uniform(0.45, 0.85),
+                                       life=1.0, size=random.uniform(7, 10), k=random.random()))
+        for n in self.notes:
+            n["x"] += n["vx"]
+            n["y"] -= n["vy"]
+            n["life"] -= 0.026
+        self.notes = [n for n in self.notes if n["life"] > 0]
+        if self.playing or self.notes or self.reveal > 0.02:
+            self.update()
+
     def paintEvent(self, _):
-        th = self.app_win.theme
+        if self.disc_pm is None:
+            self.set_cover(None)
+            return
+        th = self.theme
+        light = th["light"]
+        a, b = QColor(th["acc"][0]), QColor(th["acc"][1])
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
         w, h = self.width(), self.height()
-        border = QColor(255, 255, 255, 200 if th["light"] else 70)
-        paint_backdrop(p, w, h, 26, th, self.app_win.blob_cols, border)
-        track = QColor(0, 0, 0, 35) if th["light"] else QColor(255, 255, 255, 45)
-        p.setPen(Qt.NoPen)
-        p.setBrush(track)
-        p.drawRoundedRect(QRectF(20, h - 13, w - 34, 3), 1.5, 1.5)
-        if self.progress > 0:
-            g = QLinearGradient(20, 0, w - 14, 0)
-            g.setColorAt(0, QColor(th["acc"][0]))
-            g.setColorAt(1, QColor(th["acc"][1]))
+        t = max(0.0, min(1.0, self.reveal))
+        iris = min(1.0, t / 0.14)
+        iris = iris * iris * (3 - 2 * iris)  # smoothstep: notch widens into the full card as it slides out
+        nw = NOTCH_W + (w - 2 - NOTCH_W) * iris
+        region = QRectF((w - nw) / 2, 1, nw, h - 2)
+        radius = 6 + 20 * iris
+        paint_backdrop(p, w, h, radius, th, self.app_win.blob_cols,
+                       QColor(255, 255, 255, 200 if light else 85), 1.5, region)
+        clip = QPainterPath()
+        clip.addRoundedRect(region, radius, radius)
+        p.setClipPath(clip)
+        lv = self.app_win.viz.levels
+
+        if t > 0.05 and self.playing and max(lv) > 0.02:  # skyline equalizer behind the controls
+            g = QLinearGradient(18, 0, w - 18, 0)
+            ca, cb = QColor(a), QColor(b)
+            ca.setAlpha(95)
+            cb.setAlpha(95)
+            g.setColorAt(0, ca)
+            g.setColorAt(1, cb)
+            p.setPen(Qt.NoPen)
             p.setBrush(QBrush(g))
-            p.drawRoundedRect(QRectF(20, h - 13, (w - 34) * min(1.0, self.progress), 3), 1.5, 1.5)
+            n = len(lv)
+            bw = (w - 36) / n
+            for i, l in enumerate(lv):
+                if l > 0.02:
+                    bh = 3 + l * 30
+                    p.drawRoundedRect(QRectF(18 + i * bw + 1, h - 13 - bh, bw - 2, bh), 2, 2)
+
+        if t > 0.3:  # the record
+            c = QPointF(16 + DISC / 2, 12 + DISC / 2)
+            bass = sum(lv[:4]) / 4 if self.playing else 0.0
+            sc = 1.0 + 0.07 * bass  # pulses with the bass
+            glow = QRadialGradient(c, DISC * 0.95)
+            g0, g1 = QColor(a), QColor(a)
+            g0.setAlpha(int(55 + 120 * bass))
+            g1.setAlpha(0)
+            glow.setColorAt(0.55, g0)
+            glow.setColorAt(1.0, g1)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(glow))
+            p.drawEllipse(c, DISC * 0.95, DISC * 0.95)
+            p.save()
+            p.translate(c)
+            p.scale(sc, sc)
+            p.rotate(self.angle)
+            p.drawPixmap(QPointF(-DISC / 2, -DISC / 2), self.disc_pm)
+            p.restore()
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 95), 2, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(QRectF(c.x() - DISC / 2 + 5, c.y() - DISC / 2 + 5, DISC - 10, DISC - 10), 105 * 16, 55 * 16)
+            for nt in self.notes:  # floating notes
+                col = QColor(a if nt["k"] < 0.5 else b)
+                col.setAlpha(int(210 * min(1.0, nt["life"] * 1.6)))
+                draw_note(p, nt["x"], nt["y"], nt["size"], col)
+
+        # progress line: visible even when tucked away, so the notch shows playback and breathes while playing
+        ty = h - 8
+        inset = 16 + 6 * iris
+        x0, x1 = region.left() + inset, region.right() - inset
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 38) if light else QColor(255, 255, 255, 48))
+        p.drawRoundedRect(QRectF(x0, ty - 1.7, x1 - x0, 3.4), 1.7, 1.7)
+        if self.progress > 0:
+            xe = x0 + (x1 - x0) * min(1.0, self.progress)
+            g = QLinearGradient(x0, 0, x1, 0)
+            g.setColorAt(0, a)
+            g.setColorAt(1, b)
+            p.setBrush(QBrush(g))
+            p.drawRoundedRect(QRectF(x0, ty - 1.7, max(3.4, xe - x0), 3.4), 1.7, 1.7)
+            pulse = 0.5 + 0.5 * math.sin(self.phase) if self.playing else 0.4
+            hg = QRadialGradient(QPointF(xe, ty), 11)
+            h0, h1 = QColor(255, 255, 255, int(70 + 110 * pulse)), QColor(255, 255, 255, 0)
+            hg.setColorAt(0, h0)
+            hg.setColorAt(1, h1)
+            p.setBrush(QBrush(hg))
+            p.drawEllipse(QPointF(xe, ty), 11, 11)
+            p.setBrush(QColor(255, 255, 255))
+            p.drawEllipse(QPointF(xe, ty), 3.6, 3.6)
 
 
 class MediaKeys(QAbstractNativeEventFilter):
@@ -1107,6 +1480,7 @@ class HazeAudio(QWidget):
         self.mini.b_prev.clicked.connect(self.prev)
         self.mini.b_open.clicked.connect(self.show_main)
         self.mini.b_quit.clicked.connect(self.quit_app)
+        self.mini.seekRequested.connect(self._mini_seek)
         QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle)
         QShortcut(QKeySequence(Qt.Key_Left), self, lambda: self.media.setPosition(max(0, self.media.position() - 5000)))
         QShortcut(QKeySequence(Qt.Key_Right), self, lambda: self.media.setPosition(self.media.position() + 5000))
@@ -1144,6 +1518,7 @@ class HazeAudio(QWidget):
         self.cover_img = img if (isinstance(img, QImage) and not img.isNull()) else None
         a, b = self.theme["acc"]
         self.cover.setPixmap(make_cover(self.cover_img, a, b))
+        self.mini.set_cover(self.cover_img)
         target = [QColor(c) for c in self.theme["blobs"]]
         if self.cover_colors_on and self.cover_img is not None:
             target = dominant_colors(self.cover_img) or target
@@ -1523,10 +1898,13 @@ class HazeAudio(QWidget):
     def enter_mini(self):
         if self.mini.isVisible():
             return
-        g = self.geometry()
-        self.mini.move(g.x() + g.width() - self.mini.width() - 24, g.y() + 24)
-        self.mini.show()
+        self.mini.present()
         self.hide()
+
+    def _mini_seek(self, ratio):
+        d = self.media.duration()
+        if d > 0:
+            self.media.setPosition(int(d * ratio))
 
     def _tray_click(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -1638,6 +2016,7 @@ class HazeAudio(QWidget):
         self.list.setCurrentRow(i)
         self.refresh_marks()
         self.update_tray_tip()
+        self.mini.announce()
 
     def select_without_play(self, i, position=0):
         self.cur, self.cur_path = i, self.paths[i]
@@ -1789,6 +2168,7 @@ class HazeAudio(QWidget):
             self.viz_on = bool(s.get("visualizer", True)) and self.tap is not None
             self.close_to_tray = bool(s.get("close_to_tray", True))
             self.global_keys = bool(s.get("global_keys", True))
+            self.mini.set_docked(bool(s.get("mini_docked", True)))
             self.apply_theme(s.get("theme", "Haze"), instant=True)
             self.vol.setValue(int(s.get("volume", 80)))
             self.b_shuf.setChecked(bool(s.get("shuffle", False)))
@@ -1821,6 +2201,7 @@ class HazeAudio(QWidget):
             "on_top": self.btn_pin.isChecked(), "theme": self.theme_name,
             "cover_colors": self.cover_colors_on, "visualizer": self.viz_on,
             "close_to_tray": self.close_to_tray, "global_keys": self.global_keys,
+            "mini_docked": self.mini.docked,
             "device": self.device_hex,
             "geometry": [g.x(), g.y(), g.width(), g.height()],
             "paths": self.paths,

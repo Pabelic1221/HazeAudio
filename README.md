@@ -23,10 +23,14 @@
 <p align="center">
   <img src="docs/screenshot-frost.png" width="500" alt="Frost light theme">
   &nbsp;
-  <img src="docs/screenshot-mini.png" width="300" alt="Mini player">
+  <img src="docs/screenshot-mini.png" width="380" alt="Mini player">
 </p>
 
-<sub><i>Screenshots show the Haze theme, the light Frost theme with colors taken from album art, and the mini-player.</i></sub>
+<p align="center">
+  <img src="docs/screenshot-dock.png" width="640" alt="The docked mini-player tucks into a notch at the top of the screen and springs out on hover">
+</p>
+
+<sub><i>The Haze theme, the light Frost theme with colors taken from album art, and the docked mini-player: it tucks into a small notch at the top of your screen and springs out when you hover it. (Illustrative renders.)</i></sub>
 
 ---
 
@@ -44,7 +48,7 @@
 - Optional **colors from album art**: the background glows shift to match each cover
 
 **Stays out of your way**
-- **Mini-player**: a small always-on-top glass bar
+- **Docked mini-player**: hangs from the top-center of your screen like a notch, tucks away, and **springs out when you hover it**
 - **System tray**: close the window and the music keeps playing
 - **Global media keys** (Windows): play/pause, next, previous from your keyboard in any app
 - Keep-on-top pin, sleep timer with a gentle fade-out, soft fades on pause and resume
@@ -82,6 +86,17 @@ Drop audio files or folders onto the window. The first track starts playing auto
 | `Ctrl` + `F` | Search the playlist |
 | Media keys | Play/pause, next, previous (global on Windows) |
 
+### The docked mini-player
+
+Click **▭** in the title bar. The mini-player peeks out for a moment, then tucks into a small glowing notch at the top-center of your screen.
+
+- **Hover** the notch and it springs out. Move away and it tucks back.
+- A **new song** pops it out for a few seconds, like a now-playing toast.
+- **Drop files** on the notch to add them.
+- Click or drag the **progress line** to seek. Double-click the player to open the full window.
+- **Drag** it anywhere: release near the top edge and it snaps back into the dock; release elsewhere and it floats freely. The pin button toggles auto-hide.
+- It's playful: a spinning record made from the cover art that pulses with the bass, floating notes, and a skyline equalizer behind the controls.
+
 The title bar has the **mini-player** (▭), **settings** (⚙: themes, output device, sleep timer, tray and media-key options), **keep on top** (📌), minimize and close.
 
 ## Run from source
@@ -89,9 +104,11 @@ The title bar has the **mini-player** (▭), **settings** (⚙: themes, output d
 You need **Windows 10/11 (64-bit)** and **Python 3.12**. The code is plain PySide6, so it should also run from source on macOS and Linux, but Windows is the supported target.
 
 ```bash
-pip install -r requirements.txt
-python haze_audio.py
+py -m pip install -r requirements.txt
+py haze_audio.py
 ```
+
+> **"No module named PySide6.QtMultimedia"?** The audio module is in the `PySide6-Addons` package. `requirements.txt` installs it; use `py -m pip` (not plain `pip`) so it goes into the same Python that `py` runs.
 
 ## Build the app yourself
 
