@@ -18,12 +18,12 @@ from collections import deque
 from pathlib import Path
 from string import Template
 
-from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QPoint, QPropertyAnimation,
-                            QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEasingCurve, QPoint, QPointF,
+                            QPropertyAnimation, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont,
                            QFontMetrics, QGuiApplication, QIcon, QImage, QKeySequence,
                            QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap,
-                           QRadialGradient, QShortcut)
+                           QPolygonF, QRadialGradient, QShortcut)
 from PySide6.QtMultimedia import (QAudioFormat, QAudioOutput, QMediaDevices, QMediaMetaData,
                                   QMediaPlayer)
 try:
@@ -31,7 +31,7 @@ try:
 except ImportError:  # older Qt: the app still works, just without the visualizer
     QAudioBufferOutput = None
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton,
                                QSizeGrip, QSlider, QStyle, QSystemTrayIcon, QVBoxLayout, QWidget)
 
@@ -72,12 +72,7 @@ QPushButton { color: $txt; background: $btn; border: 1px solid $border; border-r
 QPushButton:hover { background: $btn_hover; }
 QPushButton:pressed { background: $btn_press; }
 QPushButton:checked { background: $chk; border-color: $chk_border; }
-QPushButton#play { color: white; border: 1px solid rgba(255,255,255,0.5); font-size: 22px;
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 $a, stop:1 $b); }
-QPushButton#play:hover { border: 2px solid rgba(255,255,255,0.9); }
 QPushButton#pill { border-radius: 16px; padding: 0 14px; font-size: 12px; }
-QPushButton#win { font-size: 13px; }
-QPushButton#close:hover { background: rgba(255,80,90,0.8); color: white; }
 QSlider::groove:horizontal { height: 6px; background: $groove; border-radius: 3px; }
 QSlider::sub-page:horizontal { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 $a, stop:1 $b); border-radius: 3px; }
 QSlider::handle:horizontal { width: 16px; height: 16px; margin: -5px 0; border-radius: 8px; background: white; border: 1px solid $handle_border; }
@@ -244,17 +239,210 @@ def make_cover(img, a: str, b: str) -> QPixmap:
     return pm
 
 
-def make_btn(text, size=44, name=None, checkable=False, tip=""):
-    b = QPushButton(text)
-    b.setFixedSize(size, size)
-    b.setCursor(Qt.PointingHandCursor)
-    b.setCheckable(checkable)
-    b.setToolTip(tip)
-    b.setFocusPolicy(Qt.NoFocus)
-    b.setStyleSheet(f"QPushButton{{border-radius:{size // 2}px;}}")
-    if name:
-        b.setObjectName(name)
-    return b
+def _draw_icon(p, kind, ink, checked=False):
+    """Vector icons on a 24x24 grid, so they look identical on every PC (no font or emoji dependence)."""
+    def stroke(width=1.9):
+        p.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+
+    def solid(width=0.0):
+        p.setPen(QPen(ink, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin) if width else Qt.NoPen)
+        p.setBrush(ink)
+
+    def poly(pts):
+        p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in pts]))
+
+    def line(x1, y1, x2, y2):
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    if kind == "play":
+        solid(2.4)
+        poly([(8.9, 6.6), (17.6, 12), (8.9, 17.4)])
+    elif kind == "pause":
+        solid()
+        p.drawRoundedRect(QRectF(6.9, 5.8, 3.9, 12.4), 1.7, 1.7)
+        p.drawRoundedRect(QRectF(13.2, 5.8, 3.9, 12.4), 1.7, 1.7)
+    elif kind in ("prev", "next"):
+        solid()
+        if kind == "prev":
+            p.drawRoundedRect(QRectF(5.6, 6.2, 2.5, 11.6), 1.2, 1.2)
+            solid(2.0)
+            poly([(18, 7.4), (10, 12), (18, 16.6)])
+        else:
+            p.drawRoundedRect(QRectF(15.9, 6.2, 2.5, 11.6), 1.2, 1.2)
+            solid(2.0)
+            poly([(6, 7.4), (14, 12), (6, 16.6)])
+    elif kind == "shuffle":
+        stroke()
+        a = QPainterPath()
+        a.moveTo(3.5, 7)
+        a.lineTo(7, 7)
+        a.cubicTo(12, 7, 11, 17, 16, 17)
+        a.lineTo(17.5, 17)
+        b = QPainterPath()
+        b.moveTo(3.5, 17)
+        b.lineTo(7, 17)
+        b.cubicTo(12, 17, 11, 7, 16, 7)
+        b.lineTo(17.5, 7)
+        p.drawPath(a)
+        p.drawPath(b)
+        solid(0.8)
+        poly([(17.2, 4.6), (21.2, 7), (17.2, 9.4)])
+        poly([(17.2, 14.6), (21.2, 17), (17.2, 19.4)])
+    elif kind in ("repeat", "repeat1"):
+        stroke()
+        a = QPainterPath()
+        a.moveTo(5, 11.4)
+        a.lineTo(5, 10.5)
+        a.quadTo(5, 7.5, 8, 7.5)
+        a.lineTo(16.5, 7.5)
+        b = QPainterPath()
+        b.moveTo(19, 12.6)
+        b.lineTo(19, 13.5)
+        b.quadTo(19, 16.5, 16, 16.5)
+        b.lineTo(7.5, 16.5)
+        p.drawPath(a)
+        p.drawPath(b)
+        solid(0.8)
+        poly([(15.8, 4.9), (20.2, 7.5), (15.8, 10.1)])
+        poly([(8.2, 13.9), (3.8, 16.5), (8.2, 19.1)])
+        if kind == "repeat1":
+            stroke(1.5)
+            p.drawPolyline(QPolygonF([QPointF(10.8, 10.9), QPointF(12.3, 10.1), QPointF(12.3, 13.9)]))
+    elif kind == "min":
+        stroke(2.2)
+        line(6.5, 12, 17.5, 12)
+    elif kind == "close":
+        stroke(2.1)
+        line(7.2, 7.2, 16.8, 16.8)
+        line(16.8, 7.2, 7.2, 16.8)
+    elif kind == "gear":  # settings: three sliders (reads more clearly than a cog at small sizes)
+        stroke(1.9)
+        for y, kx in ((6.5, 15.5), (12, 8.5), (17.5, 14)):
+            line(3.8, y, kx - 3.3, y)
+            line(kx + 3.3, y, 20.2, y)
+            p.drawEllipse(QPointF(kx, y), 2.4, 2.4)
+    elif kind == "pin":
+        stroke(1.8)
+        p.setBrush(ink if checked else Qt.NoBrush)
+        poly([(9, 4), (15, 4), (14.2, 10.3), (17.2, 13), (6.8, 13), (9.8, 10.3)])
+        line(12, 13, 12, 20)
+    elif kind == "mini":
+        stroke(1.9)
+        p.drawRoundedRect(QRectF(3.5, 5.5, 17, 13), 2.6, 2.6)
+        solid()
+        p.drawRoundedRect(QRectF(12, 11, 6, 5), 1.2, 1.2)
+    elif kind == "expand":
+        stroke(1.9)
+        a = QPainterPath()
+        a.moveTo(14, 4.8)
+        a.lineTo(19.2, 4.8)
+        a.lineTo(19.2, 10)
+        b = QPainterPath()
+        b.moveTo(10, 19.2)
+        b.lineTo(4.8, 19.2)
+        b.lineTo(4.8, 14)
+        p.drawPath(a)
+        p.drawPath(b)
+        line(19, 5, 13.5, 10.5)
+        line(5, 19, 10.5, 13.5)
+
+
+class IconButton(QAbstractButton):
+    """Round glass button with a painted vector icon. Replaces text/emoji glyphs."""
+    DOT_KINDS = ("shuffle", "repeat", "repeat1")
+
+    def __init__(self, kind, size=44, primary=False, checkable=False, danger=False, tip=""):
+        super().__init__()
+        self.kind, self.primary, self.danger = kind, primary, danger
+        self._hover = False
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setCheckable(checkable)
+        self.setToolTip(tip)
+        self.setAccessibleName(tip or kind)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def setKind(self, kind):
+        self.kind = kind
+        self.update()
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, _):
+        th = getattr(self.window(), "theme", None) or THEMES["Haze"]
+        light = th["light"]
+        acc_a, acc_b = QColor(th["acc"][0]), QColor(th["acc"][1])
+        base = QColor("#1f1b3d") if light else QColor("#ffffff")
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w = float(self.width())
+        c = QPointF(w / 2, w / 2)
+        down, hov, on = self.isDown(), self._hover, self.isChecked()
+        if self.primary:
+            r = w / 2 - (6.5 if down else 4.5 if hov else 5.5)
+            halo = QRadialGradient(c, w / 2)
+            h0, h1 = QColor(acc_a), QColor(acc_a)
+            h0.setAlpha(125 if hov else 90)
+            h1.setAlpha(0)
+            halo.setColorAt(0.68, h0)
+            halo.setColorAt(1.0, h1)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(halo))
+            p.drawEllipse(c, w / 2, w / 2)
+            g = QLinearGradient(c.x() - r, c.y() - r, c.x() + r, c.y() + r)
+            g.setColorAt(0, acc_a.lighter(106) if hov else acc_a)
+            g.setColorAt(1, acc_b.lighter(106) if hov else acc_b)
+            p.setBrush(QBrush(g))
+            p.setPen(QPen(QColor(255, 255, 255, 140), 1.2))
+            p.drawEllipse(c, r, r)
+            clip = QPainterPath()
+            clip.addEllipse(c, r - 1, r - 1)
+            p.setClipPath(clip)
+            gloss = QLinearGradient(0, c.y() - r, 0, c.y())
+            gloss.setColorAt(0, QColor(255, 255, 255, 90))
+            gloss.setColorAt(1, QColor(255, 255, 255, 0))
+            p.fillRect(QRectF(c.x() - r, c.y() - r, 2 * r, r), gloss)
+            p.setClipping(False)
+            ink, frac = QColor("#ffffff"), 0.50
+        else:
+            r = w / 2 - 1
+            if self.danger and hov:
+                fill, ink, edge = QColor(255, 80, 90, 235), QColor("#ffffff"), QColor(255, 255, 255, 60)
+            elif self.isCheckable():
+                ink = acc_a if on else QColor(base.red(), base.green(), base.blue(), 175)
+                fill = QColor(acc_a.red(), acc_a.green(), acc_a.blue(), 55 if on else 0)
+                if hov and not on:
+                    fill = QColor(255, 255, 255, 120 if light else 38)
+                edge = QColor(0, 0, 0, 0)
+            else:
+                ink = base
+                if light:
+                    fill = QColor(255, 255, 255, 235 if down else 215 if hov else 150)
+                    edge = QColor(31, 27, 61, 40)
+                else:
+                    fill = QColor(255, 255, 255, 64 if down else 52 if hov else 30)
+                    edge = QColor(255, 255, 255, 60)
+            p.setPen(QPen(edge, 1.0))
+            p.setBrush(fill)
+            p.drawEllipse(c, r, r)
+            frac = 0.5 if w >= 40 else 0.6
+        p.save()
+        p.translate(c)
+        p.scale(w * frac / 24, w * frac / 24)
+        p.translate(-12, -12)
+        _draw_icon(p, self.kind, ink, on)
+        p.restore()
+        if on and self.kind in self.DOT_KINDS:  # little "active" dot under toggles
+            p.setPen(Qt.NoPen)
+            p.setBrush(acc_a)
+            p.drawEllipse(QPointF(c.x(), w - 4.5), 1.8, 1.8)
 
 
 def paint_backdrop(p, w, h, radius, theme, blobs, border: QColor, border_w=1.5):
@@ -526,6 +714,10 @@ class Visualizer(QWidget):
 class MiniPlayer(QWidget):
     """Small always-on-top glass bar."""
 
+    @property
+    def theme(self):  # lets IconButton read the active theme from its window
+        return self.app_win.theme
+
     def __init__(self, app_win):
         super().__init__()
         self.app_win = app_win
@@ -548,23 +740,22 @@ class MiniPlayer(QWidget):
         col.addWidget(self.artist)
         col.addStretch()
         lay.addLayout(col, 1)
-        self.b_prev = make_btn("⏮", 34, tip="Previous")
-        self.b_play = make_btn("▶", 44, "play", tip="Play / Pause")
-        self.b_next = make_btn("⏭", 34, tip="Next")
-        self.b_open = make_btn("⤢", 28, "win", tip="Back to full player")
-        self.b_quit = make_btn("✕", 28, "win", tip="Quit")
-        self.b_quit.setObjectName("close")
+        self.b_prev = IconButton("prev", 36, tip="Previous")
+        self.b_play = IconButton("play", 48, primary=True, tip="Play / Pause")
+        self.b_next = IconButton("next", 36, tip="Next")
+        self.b_open = IconButton("expand", 30, tip="Back to full player")
+        self.b_quit = IconButton("close", 30, danger=True, tip="Quit")
         for b in (self.b_prev, self.b_play, self.b_next, self.b_open, self.b_quit):
             lay.addWidget(b, 0, Qt.AlignVCenter)
 
     def set_text(self, title, artist):
         fm = QFontMetrics(self.title.font())
-        self.title.setText(fm.elidedText(title, Qt.ElideRight, 170))
+        self.title.setText(fm.elidedText(title, Qt.ElideRight, 158))
         self.title.setToolTip(title)
-        self.artist.setText(QFontMetrics(self.artist.font()).elidedText(artist, Qt.ElideRight, 170))
+        self.artist.setText(QFontMetrics(self.artist.font()).elidedText(artist, Qt.ElideRight, 158))
 
     def set_playing(self, on):
-        self.b_play.setText("❚❚" if on else "▶")
+        self.b_play.setKind("pause" if on else "play")
 
     def set_progress(self, pos, dur):
         self.progress = pos / dur if dur > 0 else 0.0
@@ -730,12 +921,11 @@ class HazeAudio(QWidget):
         bl.setSpacing(6)
         name = QLabel(APP_NAME)
         name.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
-        self.btn_mini = make_btn("▭", 28, "win", tip="Mini player")
-        self.btn_gear = make_btn("⚙", 28, "win", tip="Settings")
-        self.btn_pin = make_btn("📌", 28, "win", checkable=True, tip="Keep on top")
-        self.btn_min = make_btn("–", 28, "win", tip="Minimize")
-        self.btn_close = make_btn("✕", 28, "win", tip="Close")
-        self.btn_close.setObjectName("close")
+        self.btn_mini = IconButton("mini", 30, tip="Mini player")
+        self.btn_gear = IconButton("gear", 30, tip="Settings")
+        self.btn_pin = IconButton("pin", 30, checkable=True, tip="Keep on top")
+        self.btn_min = IconButton("min", 30, tip="Minimize")
+        self.btn_close = IconButton("close", 30, danger=True, tip="Close")
         bl.addWidget(name)
         bl.addStretch()
         for b in (self.btn_mini, self.btn_gear, self.btn_pin, self.btn_min, self.btn_close):
@@ -782,11 +972,11 @@ class HazeAudio(QWidget):
 
         ctl = QHBoxLayout()
         ctl.setSpacing(10)
-        self.b_shuf = make_btn("⇄", 38, checkable=True, tip="Shuffle")
-        self.b_prev = make_btn("⏮", 44, tip="Previous")
-        self.b_play = make_btn("▶", 64, "play", tip="Play / Pause (Space)")
-        self.b_next = make_btn("⏭", 44, tip="Next")
-        self.b_rep = make_btn("↻", 38, checkable=True, tip="Repeat: off")
+        self.b_shuf = IconButton("shuffle", 40, checkable=True, tip="Shuffle")
+        self.b_prev = IconButton("prev", 46, tip="Previous")
+        self.b_play = IconButton("play", 70, primary=True, tip="Play / Pause (Space)")
+        self.b_next = IconButton("next", 46, tip="Next")
+        self.b_rep = IconButton("repeat", 40, checkable=True, tip="Repeat: off")
         ctl.addStretch()
         for w in (self.b_shuf, self.b_prev, self.b_play, self.b_next, self.b_rep):
             ctl.addWidget(w, 0, Qt.AlignVCenter)
@@ -945,6 +1135,8 @@ class HazeAudio(QWidget):
         self.credit.setText(f'Made with ❤️ by <a href="{CREDIT_URL}" '
                             f'style="color:{link}; text-decoration:none;">Jushua Pabelic</a>')
         self.set_cover(self.cover_img, instant=instant)
+        for btn in self.findChildren(IconButton) + self.mini.findChildren(IconButton):
+            btn.update()
         self.update()
         self.mini.update()
 
@@ -1516,7 +1708,7 @@ class HazeAudio(QWidget):
     def set_repeat(self, mode):
         self.repeat = mode
         self.b_rep.setChecked(self.repeat > 0)
-        self.b_rep.setText("↻¹" if self.repeat == 2 else "↻")
+        self.b_rep.setKind("repeat1" if self.repeat == 2 else "repeat")
         self.b_rep.setToolTip(["Repeat: off", "Repeat: all", "Repeat: one track"][self.repeat])
 
     # ---------- media signals ----------
@@ -1533,7 +1725,7 @@ class HazeAudio(QWidget):
 
     def on_state(self, st):
         playing = st == QMediaPlayer.PlayingState
-        self.b_play.setText("❚❚" if playing else "▶")
+        self.b_play.setKind("pause" if playing else "play")
         self.mini.set_playing(playing)
         if playing and not self.viz_timer.isActive():
             self.viz_timer.start()
